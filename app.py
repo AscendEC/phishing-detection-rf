@@ -805,67 +805,146 @@ def page_url():
         st.download_button("Download extracted features (CSV)", result["features"].to_csv(index=False).encode("utf-8"),
                            file_name="url_extracted_features.csv", mime="text/csv")
     with tab2:
-        st.markdown("#### Review and manually adjust the model inputs")
-        st.write("The URL fills in features automatically first. You can then edit any of the 81 numeric feature values and recalculate the prediction without entering the URL again.")
-        st.caption("The Auto-filled value column preserves the original extraction for reference. Edit only the Editable value column, then select Apply edits and recalculate.")
+        st.markdown("#### Edit features by category")
+        st.write("The URL first fills the features automatically. Use the category tabs below to inspect each group and choose a value from the dropdown for any feature. Apply changes in that category to recalculate the model prediction.")
+        st.caption("Dropdown presets are based on the dataset's observed values. For numeric features, Low / Median / High are representative dataset percentiles, not risk labels. External-service values may be unavailable and imputed.")
         current_result = st.session_state.get("url_demo_result", result)
         current_features = current_result["features"].iloc[0]
         automatic_features = current_result.get("auto_features", current_result["features"]).iloc[0]
-        editor_rows = []
-        for feature_name in FEATURES:
-            auto_value = automatic_features.get(feature_name, np.nan)
-            current_value = current_features.get(feature_name, np.nan)
-            family = GROUP_OF.get(feature_name, "Other")
-            source = "URL-derived" if family == "URL-based" else ("HTML-derived when available" if family == "Content-based" else "External / unavailable where not queried")
-            editor_rows.append({
-                "Feature": feature_name,
-                "Feature family": family,
-                "Auto-filled value": float(auto_value) if pd.notna(auto_value) else np.nan,
-                "Editable value": float(current_value) if pd.notna(current_value) else np.nan,
-                "Source": source,
-            })
-        editor_df = pd.DataFrame(editor_rows)
-        editor_key = f"url_feature_editor_{current_result.get('edit_key', 1)}_{current_result.get('editor_revision', 0)}"
-        with st.form(f"manual_url_features_form_{current_result.get('edit_key', 1)}_{current_result.get('editor_revision', 0)}"):
-            edited_table = st.data_editor(
-                editor_df,
-                key=editor_key,
-                hide_index=True,
-                use_container_width=True,
-                height=520,
-                num_rows="fixed",
-                column_config={
-                    "Feature": st.column_config.TextColumn("Feature", disabled=True, help="Exact model feature name."),
-                    "Feature family": st.column_config.TextColumn("Feature family", disabled=True),
-                    "Auto-filled value": st.column_config.NumberColumn("Auto-filled value", disabled=True, format="%.5f", help="Value initially derived from the URL or available HTML."),
-                    "Editable value": st.column_config.NumberColumn("Editable value", format="%.5f", step=0.1, help="Change this value to test how the prediction responds. Leave blank to let the model impute it."),
-                    "Source": st.column_config.TextColumn("Source", disabled=True),
-                },
-            )
-            apply_edits = st.form_submit_button("Apply edits and recalculate", type="primary", use_container_width=True)
-        if apply_edits:
-            try:
-                edited_features = current_result["features"].copy()
-                for _, edited_row in edited_table.iterrows():
-                    feature_name = edited_row["Feature"]
-                    value = pd.to_numeric(pd.Series([edited_row["Editable value"]]), errors="coerce").iloc[0]
-                    edited_features.loc[edited_features.index[0], feature_name] = float(value) if pd.notna(value) else np.nan
-                selected_model = get_model(active)
-                edited_score = float(core.predict_proba(selected_model, edited_features)[0])
-                current_result["features"] = edited_features[FEATURES]
-                current_result["score"] = edited_score
-                current_result["prediction"] = "phishing" if bool(core.is_phishing(edited_score)) else "legitimate"
-                current_result["model"] = active
-                current_result["manually_edited"] = True
-                current_result["editor_revision"] = int(current_result.get("editor_revision", 0)) + 1
-                st.session_state["url_demo_result"] = current_result
-                st.success("Updated feature values were sent to the model and the prediction was recalculated.")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not recalculate using the edited features ({type(exc).__name__}). Check the values and try again.")
-        if st.button("Reset all features to URL auto-fill", key=f"reset_url_features_{current_result.get('edit_key', 1)}", use_container_width=True):
+        revision = int(current_result.get("editor_revision", 0))
+
+        family_specs = [
+            ("URL-based", "URL-based features"),
+            ("Content-based", "Page content features"),
+            ("External-service", "External / reputation features"),
+        ]
+        family_tabs = st.tabs([f"{label} ({sum(1 for f in FEATURES if GROUP_OF.get(f) == group)})" for group, label in family_specs])
+
+        def fmt_feature_value(value):
+            if pd.isna(value):
+                return "Missing (model will impute)"
+            if isinstance(value, (float, np.floating)):
+                return f"{float(value):.5g}"
+            return str(value)
+
+        def feature_choices(feature_name, auto_value, current_value):
+            choices = []
+            values = {}
+            current_label = f"Current · {fmt_feature_value(current_value)}"
+            choices.append(current_label)
+            values[current_label] = float(current_value) if pd.notna(current_value) else np.nan
+            auto_label = f"Auto-fill · {fmt_feature_value(auto_value)}"
+            if auto_label not in values:
+                choices.append(auto_label)
+                values[auto_label] = float(auto_value) if pd.notna(auto_value) else np.nan
+
+            series = pd.to_numeric(DS[feature_name], errors="coerce").dropna()
+            unique_values = sorted(series.unique().tolist())
+            if len(unique_values) <= 5:
+                for val in unique_values:
+                    label = f"Dataset value · {fmt_feature_value(val)}"
+                    if label not in values:
+                        choices.append(label)
+                        values[label] = float(val)
+            else:
+                quantiles = [("Low · P10", float(series.quantile(.10))),
+                             ("Median · P50", float(series.quantile(.50))),
+                             ("High · P90", float(series.quantile(.90)))]
+                for label_base, val in quantiles:
+                    label = f"{label_base} · {fmt_feature_value(val)}"
+                    if label not in values:
+                        choices.append(label)
+                        values[label] = val
+            choices.append("Custom numeric value…")
+            values["Custom numeric value…"] = None
+            return choices, values
+
+        for (group_name, group_label), family_tab in zip(family_specs, family_tabs):
+            with family_tab:
+                st.markdown(f"**{group_label}**")
+                group_features = [f for f in FEATURES if GROUP_OF.get(f) == group_name]
+                st.caption(f"{len(group_features)} model features · values are aligned to the saved model's input schema")
+                selection_values = {}
+                custom_values = {}
+                with st.container(border=True):
+                    left, right = st.columns(2, gap="large")
+                    for idx, feature_name in enumerate(group_features):
+                        auto_value = automatic_features.get(feature_name, np.nan)
+                        current_value = current_features.get(feature_name, np.nan)
+                        choices, value_lookup = feature_choices(feature_name, auto_value, current_value)
+                        widget_key = f"url_feature_choice_{revision}_{group_name}_{feature_name}"
+                        col = left if idx % 2 == 0 else right
+                        description = core.FEATURE_DESC.get(feature_name, feature_name.replace("_", " ").capitalize())
+                        with col:
+                            st.markdown(f"**{feature_name}**")
+                            st.caption(description)
+                            selected = st.selectbox(
+                                "Feature value",
+                                choices,
+                                index=0,
+                                key=widget_key,
+                                label_visibility="collapsed",
+                                help=f"Feature family: {group_label}. Current value: {fmt_feature_value(current_value)}. Auto-filled value: {fmt_feature_value(auto_value)}.",
+                            )
+                            selection_values[feature_name] = value_lookup[selected]
+                            if selected == "Custom numeric value…":
+                                custom_key = f"url_feature_custom_{revision}_{group_name}_{feature_name}"
+                                custom_values[feature_name] = st.number_input(
+                                    f"Custom value for {feature_name}",
+                                    value=float(current_value) if pd.notna(current_value) else 0.0,
+                                    key=custom_key,
+                                    help="Enter the numeric value that should be sent to the model.",
+                                )
+                action_col, reset_col = st.columns(2)
+                with action_col:
+                    apply_group = st.button(
+                        f"Apply {group_label.lower()} and recalculate",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"apply_url_group_{revision}_{group_name}",
+                    )
+                with reset_col:
+                    reset_group = st.button(
+                        f"Reset {group_label.lower()} to auto-fill",
+                        use_container_width=True,
+                        key=f"reset_url_group_{revision}_{group_name}",
+                    )
+
+                if apply_group or reset_group:
+                    try:
+                        updated = current_result["features"].copy()
+                        for feature_name in group_features:
+                            if reset_group:
+                                value = automatic_features.get(feature_name, np.nan)
+                            else:
+                                value = selection_values.get(feature_name, current_features.get(feature_name, np.nan))
+                                if value is None:
+                                    value = custom_values.get(feature_name, current_features.get(feature_name, np.nan))
+                            updated.loc[updated.index[0], feature_name] = float(value) if pd.notna(value) else np.nan
+                        selected_model = get_model(active)
+                        updated = updated[FEATURES]
+                        updated_score = float(core.predict_proba(selected_model, updated)[0])
+                        current_result["features"] = updated
+                        current_result["score"] = updated_score
+                        current_result["prediction"] = "phishing" if bool(core.is_phishing(updated_score)) else "legitimate"
+                        current_result["model"] = active
+                        current_result["manually_edited"] = not reset_group or any(
+                            pd.notna(current_result.get("features", updated).iloc[0].get(f, np.nan)) and
+                            pd.notna(automatic_features.get(f, np.nan)) and
+                            float(current_result["features"].iloc[0].get(f)) != float(automatic_features.get(f))
+                            for f in FEATURES
+                        )
+                        current_result["editor_revision"] = revision + 1
+                        st.session_state["url_demo_result"] = current_result
+                        st.success("Prediction recalculated using the updated feature values." if apply_group else "This feature group was restored to its URL auto-filled values.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not recalculate the edited features ({type(exc).__name__}). Check the selected values and try again.")
+
+        st.info("These controls change the input values for a what-if demonstration; they do not retrain the Random Forest. Preset values come from the dataset distribution, and the URL-derived features are still experimental.")
+        if st.button("Reset all feature groups to URL auto-fill", key=f"reset_all_url_features_{revision}", use_container_width=True):
             reset_result = st.session_state.get("url_demo_result", current_result)
-            reset_features = reset_result.get("auto_features", reset_result["features"]).copy()
+            reset_features = reset_result.get("auto_features", reset_result["features"]).copy()[FEATURES]
             reset_model = get_model(active)
             reset_score = float(core.predict_proba(reset_model, reset_features)[0])
             reset_result["features"] = reset_features
@@ -873,10 +952,9 @@ def page_url():
             reset_result["prediction"] = "phishing" if bool(core.is_phishing(reset_score)) else "legitimate"
             reset_result["model"] = active
             reset_result["manually_edited"] = False
-            reset_result["editor_revision"] = int(reset_result.get("editor_revision", 0)) + 1
+            reset_result["editor_revision"] = revision + 1
             st.session_state["url_demo_result"] = reset_result
             st.rerun()
-        st.info("Manual edits are for demonstration and what-if testing. They do not retrain the Random Forest or change the saved model.")
     with tab3:
         unavailable = [x for x in feature_status if x["Status"] == "Unavailable · model imputed"]
         if unavailable:
