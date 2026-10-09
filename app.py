@@ -2,6 +2,9 @@
 Web Page Phishing Detection Using Random Forest Classification
 Interactive research presentation  -  run with:  streamlit run app.py
 """
+import html as html_lib
+from urllib.parse import urlparse
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -9,6 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import core
+import url_features
 
 st.set_page_config(page_title="Phishing Detection · Random Forest", page_icon="🎣", layout="wide")
 
@@ -46,7 +50,7 @@ code {{font-family:'IBM Plex Mono', monospace; color:{INK}; background:#ece8da; 
 .page-head {{margin:0 0 20px 0;}}
 .page-head .t {{font:800 36px/1.1 Fraunces, Georgia, serif; letter-spacing:-0.02em;}}
 .page-head .s {{color:{MUTED}; font-size:16px; margin-top:6px; max-width:860px;}}
-.card-title {{font:700 21px Fraunces, Georgia, serif; margin:0 0 2px 0;}}
+.card-title {{font:700 21px Fraunces, Georgia, serif; margin:0 0 8px 0; line-height:1.25; overflow-wrap:anywhere;}}
 .muted {{color:{MUTED};}} .small {{font-size:14px;}}
 
 .kpis {{display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:16px; margin:4px 0 18px 0;}}
@@ -73,8 +77,12 @@ code {{font-family:'IBM Plex Mono', monospace; color:{INK}; background:#ece8da; 
 .step .n {{font:600 12px 'IBM Plex Mono', monospace; color:{AMBER};}}
 .step .h {{font:700 16px Fraunces, Georgia, serif; margin:2px 0 4px 0;}}
 .step .b {{font-size:13px; color:{MUTED}; line-height:1.4;}}
-.url-box {{font:500 14px/1.5 'IBM Plex Mono', monospace; background:#f1eee3; border:1px dashed #cdc7b2;
-  border-radius:12px; padding:12px 16px; word-break:break-all;}}
+.url-box {{font:500 14px/1.6 'IBM Plex Mono', monospace; background:#f1eee3; border:1px dashed #cdc7b2;
+  border-radius:12px; padding:14px 16px; overflow-wrap:anywhere; word-break:break-word; white-space:normal; max-width:100%;}}
+.result-label {{display:block; font:500 11px 'IBM Plex Mono', monospace; text-transform:uppercase; letter-spacing:.08em; color:#586174; margin-bottom:6px;}}
+.result-value {{display:block; font:700 17px/1.3 'IBM Plex Sans',sans-serif; overflow-wrap:anywhere;}}
+.prediction-panel {{border-radius:16px; border:1px solid #e3dfd2; padding:18px; background:#fff; height:100%;}}
+.feature-table {{overflow-wrap:anywhere;}}
 .stTabs [data-baseweb="tab-list"] {{gap:6px;}}
 .stTabs [data-baseweb="tab"] {{border-radius:99px; padding:6px 16px; background:#ebe8dc;}}
 .stTabs [aria-selected="true"] {{background:{INK}; color:#fff !important;}}
@@ -172,7 +180,7 @@ TEST = DS[DS.split == "test"].merge(PREDS[["record_id", "proba_initial", "proba_
 
 # ------------------------------------------------------------------ sidebar / navigation
 PAGES = ["Overview", "Background & Objectives", "Dataset", "Methodology", "Model Results",
-         "Try a Record", "Batch Prediction", "Conclusion & References"]
+         "Try a Record", "Analyze a URL", "Batch Prediction", "Conclusion & References"]
 with st.sidebar:
     st.image(str(core.ASSETS / "um_logo.jpg"), width=150)
     st.markdown("**Web Page Phishing Detection**  \nUsing Random Forest Classification")
@@ -180,7 +188,7 @@ with st.sidebar:
     page = st.radio("Navigate", PAGES, label_visibility="collapsed")
     st.divider()
     active = st.radio("Active model", list(core.MODEL_FILES), key="active_model",
-                      help="Used on the results highlights, Try a Record, and Batch Prediction pages.")
+                      help="Used on the results highlights, Try a Record, Analyze a URL, and Batch Prediction pages.")
     st.caption("The tuned model is the documentation's recommended demo candidate; the initial model is kept for comparison.")
     st.divider()
     st.caption("Academic demonstration prototype. Not a security product and not a guarantee that any website is safe.")
@@ -222,8 +230,7 @@ def page_overview():
             "confusion matrices, feature importance, and correlation analysis."
         )
     with c2:
-        callout("<b>Scope reminder.</b> The model reads <b>prepared feature records</b>. It does not take a raw URL, crawl a live "
-                "site, or query DNS/WHOIS services. Feature extraction from arbitrary URLs is future work.", "warn")
+        callout("<b>Scope reminder.</b> The trained model uses 81 prepared features. The new <b>Analyze a URL</b> page derives URL signals and can inspect a limited HTML snapshot, but external-service features remain unavailable and are imputed. This live mode is experimental and was not validated by the reported test metrics.", "warn")
         callout("<b>Honest headline.</b> Both models score ≈ 96.5% accuracy. Tuning did <i>not</i> improve every metric — it "
                 "shifted the balance toward catching more phishing pages.", "info")
     st.write("")
@@ -234,6 +241,7 @@ def page_overview():
         ("Methodology", "Cleaning, transformation, the 80:20 split, the Random Forest, and hyperparameter tuning."),
         ("Model Results", "Metrics, confusion matrices, ROC/PR curves, a threshold explorer, and feature importance."),
         ("Try a Record", "Pick a held-out web page, see the model's verdict, how the trees voted, and test what-ifs."),
+        ("Analyze a URL", "Enter a web address and derive available features for an experimental live prediction."),
         ("Batch Prediction", "Upload a CSV of prepared features and download predictions with phishing probabilities."),
     ]
     cols = st.columns(3)
@@ -283,10 +291,10 @@ def page_background():
             st.markdown('<div class="card-title">In scope</div>', unsafe_allow_html=True)
             st.markdown("- The Mendeley *Web page phishing detection* dataset, Version 3\n- Inspection, cleaning, transformation, feature analysis\n"
                         "- Training, hyperparameter tuning, evaluation, model saving\n"
-                        "- A prediction interface for CSVs of **prepared** features, with downloadable results")
+                        "- A prediction interface for prepared-feature CSVs and an experimental URL feature-extraction demo")
         with c2, card():
             st.markdown('<div class="card-title">Out of scope</div>', unsafe_allow_html=True)
-            st.markdown("- Extracting features from a plain URL\n- Live crawling, DNS/WHOIS lookups, or traffic queries\n"
+            st.markdown("- Full WHOIS, web-traffic, Google-index, PageRank, or reputation-service lookups\n"
                         "- Continuous monitoring, large-scale scanning, automatic blocking\n- Browser extensions or enterprise deployment")
         callout("Evaluation uses <b>one dataset and one held-out split</b>, so performance may differ on newer websites or newer "
                 "phishing techniques. Predictions are a demonstration, not a guarantee of website safety.", "warn")
@@ -375,7 +383,7 @@ def page_method():
         ("05", "Train", "Initial Random Forest baseline (100 trees, default settings)."),
         ("06", "Tune", "Randomized search, 8 candidates, 3-fold stratified CV, scored by ROC-AUC."),
         ("07", "Evaluate", "Both models scored on the <i>same</i> held-out test set."),
-        ("08", "Demonstrate", "This Streamlit app predicts from prepared feature CSVs."),
+        ("08", "Demonstrate", "The app supports prepared-feature CSVs and an experimental URL-only/live-HTML feature extraction demo."),
     ]
     html = "".join(f'<div class="step"><div class="n">STEP {n}</div><div class="h">{h}</div><div class="b">{b}</div></div>' for n, h, b in steps)
     with card():
@@ -409,8 +417,7 @@ def page_method():
             st.markdown("- Target mapped to **0 = legitimate**, **1 = phishing**\n- All 81 predictors are numeric → no encoding or scaling needed for tree models\n"
                         "- Median imputation is stored *inside* the saved pipeline, so prediction-time gaps are handled the same way as in training\n"
                         "- **No engineered features** were added in this version")
-        callout("Generating the 81 features straight from an arbitrary URL would need a separate extraction pipeline (page content, WHOIS, "
-                "traffic, search-index lookups). That is outside this prototype's scope.", "warn")
+        callout("The Analyze a URL page derives URL features and can inspect a small HTML snapshot from a public HTTP(S) page. WHOIS, traffic, Google-index, PageRank, and reputation lookups remain unavailable; the saved pipeline imputes those missing values. This live mode is experimental and is not part of the reported held-out evaluation.", "warn")
     with t3:
         init, tuned = (core.load_model(n).named_steps["model"].get_params() for n in ("Initial Random Forest", "Tuned Random Forest"))
         space = {"n_estimators": "50, 100, 150", "max_depth": "None, 15, 30", "min_samples_split": "2, 5",
@@ -626,9 +633,13 @@ def page_try():
         st.markdown('<div class="card-title">The web page (shown as text — do not visit)</div>', unsafe_allow_html=True)
         url = str(row.url.iloc[0]).replace("<", "&lt;").replace(">", "&gt;")
         st.markdown(f'<div class="url-box">{url}</div>', unsafe_allow_html=True)
-        st.markdown(f"True label: {pill(truth.upper(), 'phish' if truth == 'phishing' else 'legit')} &nbsp; "
-                    f"Model says: {pill('PHISHING' if is_p else 'LEGITIMATE', 'phish' if is_p else 'legit')} &nbsp; "
-                    f"{pill('✓ CORRECT' if correct else '✗ WRONG', 'legit' if correct else 'phish')}", unsafe_allow_html=True)
+        status_cols = st.columns(3)
+        status_cols[0].caption("TRUE LABEL")
+        status_cols[0].markdown(pill(truth.upper(), 'phish' if truth == 'phishing' else 'legit'), unsafe_allow_html=True)
+        status_cols[1].caption("MODEL PREDICTION")
+        status_cols[1].markdown(pill('PHISHING' if is_p else 'LEGITIMATE', 'phish' if is_p else 'legit'), unsafe_allow_html=True)
+        status_cols[2].caption("TEST OUTCOME")
+        status_cols[2].markdown(pill('✓ CORRECT' if correct else '✗ WRONG', 'legit' if correct else 'phish'), unsafe_allow_html=True)
         st.caption(f"Test record #{rid} · {active}")
     with c2, card():
         st.markdown('<div class="card-title">Estimated phishing probability</div>', unsafe_allow_html=True)
@@ -677,6 +688,124 @@ def page_try():
         d2.metric("Edited probability", f"{p2:.1%}", f"{(p2 - p) * 100:+.1f} pts", delta_color="inverse")
         d3.markdown(f"Edited verdict: {pill('PHISHING' if core.is_phishing(p2) else 'LEGITIMATE', 'phish' if core.is_phishing(p2) else 'legit')}", unsafe_allow_html=True)
         st.caption("The remaining 73 features keep their original values, so an edited record may be unrealistic. For demonstration only.")
+
+
+# =================================================================== PAGE: LIVE URL DEMO
+
+def page_url():
+    head("Analyze a URL", "Enter a website address. The app derives URL features automatically and can inspect a limited HTML snapshot when the public page is reachable.")
+    callout("<b>Research-demo notice.</b> The saved Random Forest was trained on 81 prepared features. This page derives URL features and, when possible, HTML features. WHOIS, traffic, Google-index, PageRank, and reputation-service values are unavailable and are filled by the model pipeline's median imputer. This mode has <b>not</b> been evaluated as part of the reported test metrics.", "warn")
+
+    with card():
+        st.markdown('<div class="card-title">Website to analyze</div>', unsafe_allow_html=True)
+        with st.form("url_analysis_form", clear_on_submit=False):
+            entered_url = st.text_input("Website URL", placeholder="https://example.com", help="Enter a URL you are authorized to test. The app will not open it in a browser.")
+            fetch_page = st.checkbox("Try to retrieve a small HTML snapshot from the public page", value=True,
+                                     help="The request is limited to public HTTP(S) hosts, standard ports, a short timeout, limited redirects, and approximately 1 MB of HTML. If retrieval fails, URL-only features are used.")
+            analyze = st.form_submit_button("Analyze URL", type="primary", use_container_width=True)
+
+    if analyze:
+        st.session_state.pop("url_demo_result", None)
+        try:
+            with st.spinner("Deriving URL features and preparing the prediction…"):
+                row_features, info = url_features.build_feature_frame(entered_url, fetch_html=fetch_page)
+                model = get_model(active)
+                phishing_score = float(core.predict_proba(model, row_features)[0])
+                prediction = "phishing" if bool(core.is_phishing(phishing_score)) else "legitimate"
+                st.session_state["url_demo_result"] = {
+                    "url": info["normalized_url"], "features": row_features, "info": info,
+                    "score": phishing_score, "prediction": prediction, "model": active,
+                }
+        except ValueError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"The analysis could not be completed ({type(exc).__name__}). Check that the model files are present and try again.")
+
+    result = st.session_state.get("url_demo_result")
+    if not result:
+        with card():
+            st.markdown('<div class="card-title">What happens after you click Analyze?</div>', unsafe_allow_html=True)
+            steps = [
+                ("01", "Parse URL", "Measure length, hostname, symbols, subdomains, tokens, and URL warning patterns."),
+                ("02", "Inspect HTML", "If enabled and safely reachable, extract observable links, forms, media, and page markup signals."),
+                ("03", "Run the model", "Align the generated features to the saved 81-column schema and apply the model pipeline."),
+                ("04", "Review gaps", "See which features were unavailable and why the result is only an experimental estimate."),
+            ]
+            chunks = "".join(f'<div class="step"><div class="n">STEP {n}</div><div class="h">{title}</div><div class="b">{desc}</div></div>' for n, title, desc in steps)
+            st.markdown(f'<div class="steps">{chunks}</div>', unsafe_allow_html=True)
+        return
+
+    if result["model"] != active:
+        st.info(f"This result was generated with {result['model']}. Change the active model and click Analyze URL again to refresh it.")
+
+    score = result["score"]
+    is_phish = result["prediction"] == "phishing"
+    info = result["info"]
+    parsed = urlparse(result["url"])
+    tone = PHISH if is_phish else LEGIT
+    bg = PHISH_SOFT if is_phish else LEGIT_SOFT
+    verdict = "PHISHING INDICATOR" if is_phish else "LEGITIMATE CLASSIFICATION"
+
+    st.markdown("### Analysis result")
+    with st.container(border=True):
+        st.markdown(f'<div style="font:600 12px \'IBM Plex Mono\',monospace; letter-spacing:.1em; color:{MUTED}; text-transform:uppercase; margin-bottom:8px;">Analyzed address</div><div class="url-box">{html_lib.escape(result["url"])}</div>', unsafe_allow_html=True)
+        st.write("")
+        a, b, c = st.columns([1.25, 1, 1])
+        with a:
+            st.markdown('<span class="result-label">MODEL CLASSIFICATION</span>', unsafe_allow_html=True)
+            st.markdown(f'<div style="display:inline-block; max-width:100%; background:{bg}; color:{tone}; border-radius:12px; padding:12px 14px; font-size:19px; font-weight:700; overflow-wrap:anywhere;">{verdict}</div>', unsafe_allow_html=True)
+            st.caption(f"Predicted label: {result['prediction'].title()}")
+        with b:
+            st.markdown('<span class="result-label">PHISHING SCORE</span>', unsafe_allow_html=True)
+            st.markdown(f'<div style="font:800 30px/1.2 Fraunces,Georgia,serif; color:{tone};">{score:.1%}</div>', unsafe_allow_html=True)
+            st.progress(min(max(score, 0.0), 1.0))
+        with c:
+            st.markdown('<span class="result-label">FEATURE COVERAGE</span>', unsafe_allow_html=True)
+            st.markdown(f'<div style="font:800 30px/1.2 Fraunces,Georgia,serif; color:{INK};">{info["known_features"]}/81</div>', unsafe_allow_html=True)
+            st.caption(f"{info['unknown_features']} unavailable and median-imputed")
+        st.caption(f"Model: {result['model']} · Host: {parsed.hostname or 'unknown'} · HTML retrieval: {info['fetch_status']}")
+
+    if is_phish:
+        callout("The model assigned this URL to the phishing class. Do not enter credentials or payment information based on this result; investigate the address independently.", "bad")
+    else:
+        callout("The model assigned this URL to the legitimate class. This does not prove that the website is safe, especially because some feature values were unavailable or imputed.", "good")
+    st.caption(info["fetch_note"])
+
+    feat = result["features"].iloc[0]
+    feature_status = []
+    for name in FEATURES:
+        val = feat[name]
+        group = GROUP_OF.get(name, "Other")
+        available = pd.notna(val)
+        if not available:
+            status = "Unavailable · model imputed"
+            shown = "Not available"
+        else:
+            status = "Derived from URL" if group == "URL-based" else ("Extracted from HTML" if info["html_available"] and group == "Content-based" else "Estimated / derived")
+            shown = float(val) if isinstance(val, (np.floating, float, int, np.integer)) else str(val)
+            if isinstance(shown, float):
+                shown = round(shown, 5)
+        feature_status.append({"Feature": name, "Feature family": group, "Value sent to model": shown, "Status": status})
+
+    tab1, tab2, tab3 = st.tabs(["Feature values", "Unavailable features", "Interpretation notes"])
+    with tab1:
+        st.write("These are the generated values aligned to the same feature names used by the saved model. URL heuristics are approximate; HTML features are only populated when a page snapshot was successfully retrieved.")
+        fv = pd.DataFrame(feature_status)
+        filt = st.selectbox("Feature family", ["All features", "URL-based", "Content-based", "External-service"], key="url_feature_filter")
+        if filt != "All features":
+            fv = fv[fv["Feature family"] == filt]
+        st.dataframe(fv, hide_index=True, use_container_width=True, height=420)
+        st.download_button("Download extracted features (CSV)", result["features"].to_csv(index=False).encode("utf-8"),
+                           file_name="url_extracted_features.csv", mime="text/csv")
+    with tab2:
+        unavailable = [x for x in feature_status if x["Status"] == "Unavailable · model imputed"]
+        if unavailable:
+            st.dataframe(pd.DataFrame(unavailable), hide_index=True, use_container_width=True)
+        else:
+            st.success("All features have values. This does not establish that every value is an exact match to the dataset's original extraction process.")
+        st.markdown("**Not queried by this prototype:** domain registration / age, traffic rank, DNS record status, Google indexing, PageRank, and public phishing-report lookups. These are not inferable reliably from the URL string alone.")
+    with tab3:
+        st.markdown("- This is a research demonstration, not a production security scanner.\n- URL-derived values are heuristic approximations of the benchmark features.\n- Page HTML is a limited snapshot; JavaScript-rendered content may not be present.\n- Missing features are filled by the trained pipeline's median imputer, which can affect predictions.\n- The accuracy, recall, and ROC-AUC reported on the held-out test set do not validate this live URL mode.\n- Never visit a suspicious URL or enter personal information merely because the model labels it legitimate.")
 
 
 # =================================================================== PAGE: BATCH
@@ -784,8 +913,8 @@ def page_conclusion():
     with c1, card():
         st.markdown('<div class="card-title">Limitations to keep in view</div>', unsafe_allow_html=True)
         st.markdown("- One dataset and one 80:20 split; results may differ on newer sites or tactics\n"
-                    "- The model needs **prepared features**; it cannot score a raw URL\n"
-                    "- Several top predictors (`google_index`, `page_rank`, `web_traffic`) depend on external services that a live system would have to query\n"
+                    "- The URL demo derives some features automatically, but unavailable page and external-service features are imputed and can reduce reliability\n"
+                    "- Several predictors (`google_index`, `page_rank`, `web_traffic`) are not queried in this prototype\n"
                     "- Feature importance shows model reliance, not cause\n- A demonstration — not a guarantee that a site is safe")
     with c2, card():
         st.markdown('<div class="card-title">Future work</div>', unsafe_allow_html=True)
@@ -814,6 +943,7 @@ def page_conclusion():
     "Methodology": page_method,
     "Model Results": page_results,
     "Try a Record": page_try,
+    "Analyze a URL": page_url,
     "Batch Prediction": page_batch,
     "Conclusion & References": page_conclusion,
 }[page]()
