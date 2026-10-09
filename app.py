@@ -713,9 +713,13 @@ def page_url():
                 phishing_score = float(core.predict_proba(model, row_features)[0])
                 prediction = "phishing" if bool(core.is_phishing(phishing_score)) else "legitimate"
                 st.session_state["url_demo_result"] = {
-                    "url": info["normalized_url"], "features": row_features, "info": info,
+                    "url": info["normalized_url"], "features": row_features.copy(),
+                    "auto_features": row_features.copy(), "info": info,
                     "score": phishing_score, "prediction": prediction, "model": active,
+                    "edit_key": int(st.session_state.get("url_edit_counter", 0)) + 1,
+                    "editor_revision": 0, "manually_edited": False,
                 }
+                st.session_state["url_edit_counter"] = st.session_state["url_demo_result"]["edit_key"]
         except ValueError as exc:
             st.error(str(exc))
         except Exception as exc:
@@ -761,9 +765,12 @@ def page_url():
             st.progress(min(max(score, 0.0), 1.0))
         with c:
             st.markdown('<span class="result-label">FEATURE COVERAGE</span>', unsafe_allow_html=True)
-            st.markdown(f'<div style="font:800 30px/1.2 Fraunces,Georgia,serif; color:{INK};">{info["known_features"]}/81</div>', unsafe_allow_html=True)
-            st.caption(f"{info['unknown_features']} unavailable and median-imputed")
-        st.caption(f"Model: {result['model']} · Host: {parsed.hostname or 'unknown'} · HTML retrieval: {info['fetch_status']}")
+            current_known = int(result["features"].iloc[0].notna().sum())
+            current_missing = len(FEATURES) - current_known
+            st.markdown(f'<div style="font:800 30px/1.2 Fraunces,Georgia,serif; color:{INK};">{current_known}/81</div>', unsafe_allow_html=True)
+            st.caption(f"{current_missing} currently blank and median-imputed")
+        edit_status = " · Manual feature edits applied" if result.get("manually_edited", False) else " · Auto-filled features"
+        st.caption(f"Model: {result['model']} · Host: {parsed.hostname or 'unknown'} · HTML retrieval: {info['fetch_status']}{edit_status}")
 
     if is_phish:
         callout("The model assigned this URL to the phishing class. Do not enter credentials or payment information based on this result; investigate the address independently.", "bad")
@@ -787,7 +794,7 @@ def page_url():
                 shown = round(shown, 5)
         feature_status.append({"Feature": name, "Feature family": group, "Value sent to model": shown, "Status": status})
 
-    tab1, tab2, tab3 = st.tabs(["Feature values", "Unavailable features", "Interpretation notes"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Feature values", "Edit features & recalculate", "Unavailable features", "Interpretation notes"])
     with tab1:
         st.write("These are the generated values aligned to the same feature names used by the saved model. URL heuristics are approximate; HTML features are only populated when a page snapshot was successfully retrieved.")
         fv = pd.DataFrame(feature_status)
@@ -798,13 +805,86 @@ def page_url():
         st.download_button("Download extracted features (CSV)", result["features"].to_csv(index=False).encode("utf-8"),
                            file_name="url_extracted_features.csv", mime="text/csv")
     with tab2:
+        st.markdown("#### Review and manually adjust the model inputs")
+        st.write("The URL fills in features automatically first. You can then edit any of the 81 numeric feature values and recalculate the prediction without entering the URL again.")
+        st.caption("The Auto-filled value column preserves the original extraction for reference. Edit only the Editable value column, then select Apply edits and recalculate.")
+        current_result = st.session_state.get("url_demo_result", result)
+        current_features = current_result["features"].iloc[0]
+        automatic_features = current_result.get("auto_features", current_result["features"]).iloc[0]
+        editor_rows = []
+        for feature_name in FEATURES:
+            auto_value = automatic_features.get(feature_name, np.nan)
+            current_value = current_features.get(feature_name, np.nan)
+            family = GROUP_OF.get(feature_name, "Other")
+            source = "URL-derived" if family == "URL-based" else ("HTML-derived when available" if family == "Content-based" else "External / unavailable where not queried")
+            editor_rows.append({
+                "Feature": feature_name,
+                "Feature family": family,
+                "Auto-filled value": float(auto_value) if pd.notna(auto_value) else np.nan,
+                "Editable value": float(current_value) if pd.notna(current_value) else np.nan,
+                "Source": source,
+            })
+        editor_df = pd.DataFrame(editor_rows)
+        editor_key = f"url_feature_editor_{current_result.get('edit_key', 1)}_{current_result.get('editor_revision', 0)}"
+        with st.form(f"manual_url_features_form_{current_result.get('edit_key', 1)}_{current_result.get('editor_revision', 0)}"):
+            edited_table = st.data_editor(
+                editor_df,
+                key=editor_key,
+                hide_index=True,
+                use_container_width=True,
+                height=520,
+                num_rows="fixed",
+                column_config={
+                    "Feature": st.column_config.TextColumn("Feature", disabled=True, help="Exact model feature name."),
+                    "Feature family": st.column_config.TextColumn("Feature family", disabled=True),
+                    "Auto-filled value": st.column_config.NumberColumn("Auto-filled value", disabled=True, format="%.5f", help="Value initially derived from the URL or available HTML."),
+                    "Editable value": st.column_config.NumberColumn("Editable value", format="%.5f", step=0.1, help="Change this value to test how the prediction responds. Leave blank to let the model impute it."),
+                    "Source": st.column_config.TextColumn("Source", disabled=True),
+                },
+            )
+            apply_edits = st.form_submit_button("Apply edits and recalculate", type="primary", use_container_width=True)
+        if apply_edits:
+            try:
+                edited_features = current_result["features"].copy()
+                for _, edited_row in edited_table.iterrows():
+                    feature_name = edited_row["Feature"]
+                    value = pd.to_numeric(pd.Series([edited_row["Editable value"]]), errors="coerce").iloc[0]
+                    edited_features.loc[edited_features.index[0], feature_name] = float(value) if pd.notna(value) else np.nan
+                selected_model = get_model(active)
+                edited_score = float(core.predict_proba(selected_model, edited_features)[0])
+                current_result["features"] = edited_features[FEATURES]
+                current_result["score"] = edited_score
+                current_result["prediction"] = "phishing" if bool(core.is_phishing(edited_score)) else "legitimate"
+                current_result["model"] = active
+                current_result["manually_edited"] = True
+                current_result["editor_revision"] = int(current_result.get("editor_revision", 0)) + 1
+                st.session_state["url_demo_result"] = current_result
+                st.success("Updated feature values were sent to the model and the prediction was recalculated.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not recalculate using the edited features ({type(exc).__name__}). Check the values and try again.")
+        if st.button("Reset all features to URL auto-fill", key=f"reset_url_features_{current_result.get('edit_key', 1)}", use_container_width=True):
+            reset_result = st.session_state.get("url_demo_result", current_result)
+            reset_features = reset_result.get("auto_features", reset_result["features"]).copy()
+            reset_model = get_model(active)
+            reset_score = float(core.predict_proba(reset_model, reset_features)[0])
+            reset_result["features"] = reset_features
+            reset_result["score"] = reset_score
+            reset_result["prediction"] = "phishing" if bool(core.is_phishing(reset_score)) else "legitimate"
+            reset_result["model"] = active
+            reset_result["manually_edited"] = False
+            reset_result["editor_revision"] = int(reset_result.get("editor_revision", 0)) + 1
+            st.session_state["url_demo_result"] = reset_result
+            st.rerun()
+        st.info("Manual edits are for demonstration and what-if testing. They do not retrain the Random Forest or change the saved model.")
+    with tab3:
         unavailable = [x for x in feature_status if x["Status"] == "Unavailable · model imputed"]
         if unavailable:
             st.dataframe(pd.DataFrame(unavailable), hide_index=True, use_container_width=True)
         else:
             st.success("All features have values. This does not establish that every value is an exact match to the dataset's original extraction process.")
         st.markdown("**Not queried by this prototype:** domain registration / age, traffic rank, DNS record status, Google indexing, PageRank, and public phishing-report lookups. These are not inferable reliably from the URL string alone.")
-    with tab3:
+    with tab4:
         st.markdown("- This is a research demonstration, not a production security scanner.\n- URL-derived values are heuristic approximations of the benchmark features.\n- Page HTML is a limited snapshot; JavaScript-rendered content may not be present.\n- Missing features are filled by the trained pipeline's median imputer, which can affect predictions.\n- The accuracy, recall, and ROC-AUC reported on the held-out test set do not validate this live URL mode.\n- Never visit a suspicious URL or enter personal information merely because the model labels it legitimate.")
 
 

@@ -56,3 +56,9 @@ Initial 1101/42/37/1106 and Tuned 1096/47/33/1110 (TN/FP/FN/TP). Test records co
 ## Limitations
 The URL demo derives URL-syntax features and can inspect a limited HTML snapshot from a public HTTP(S) address. It does not query WHOIS, traffic, Google indexing, PageRank, or phishing-reputation services; these features are median-imputed. Live URL results are experimental and are not covered by the reported held-out test metrics.
 Results are for one dataset and one split. A demonstration, not a guarantee that a website is safe.
+
+### Analyze a URL: manual feature editing
+
+The **Analyze a URL** page first derives the available URL and HTML features automatically. Open the **Edit features & recalculate** tab to review all 81 model inputs. The **Auto-filled value** column preserves the original extraction; edit the **Editable value** column and choose **Apply edits and recalculate** to run the active saved Random Forest again. Use **Reset all features to URL auto-fill** to restore the automatically derived values.
+
+Manual edits are for demonstration and what-if analysis only. They do not retrain the model, and manually changed values may not describe a realistic website. Blank values are passed through the saved pipeline's imputer. The URL-analysis mode remains experimental and is not validated by the held-out test metrics reported in the research.
